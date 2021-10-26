@@ -23,12 +23,12 @@ defmodule HenkaTest do
 
     {:ok, pid} =
       Henka.run(%{
-        producer: fn %{ultimo_id: ultimo_id} ->
-          Enum.filter(Enum.to_list(1..1000), fn x -> x > ultimo_id end)
+        producer: fn %{last_processed_event_id: last_processed_event_id} ->
+          Enum.filter(Enum.to_list(1..1000), fn x -> x > last_processed_event_id end)
         end,
         consumer: &HenkaTest.TestAgent.adicionar/2,
         number_of_consumers: 10,
-        ultimo_id: 0
+        last_processed_event_id: 0
       })
 
     ref = Process.monitor(pid)
@@ -42,15 +42,15 @@ defmodule HenkaTest do
 
     {:ok, pid} =
       Henka.run(%{
-        producer: fn %{ultimo_id: ultimo_id} ->
-          Enum.filter(Enum.to_list(1..10), fn x -> x > ultimo_id end)
+        producer: fn %{last_processed_event_id: last_processed_event_id} ->
+          Enum.filter(Enum.to_list(1..10), fn x -> x > last_processed_event_id end)
         end,
         consumer: &HenkaTest.TestAgent.adicionar/2,
         number_of_consumers: 10,
         end_hook: fn _state ->
           Agent.update(HenkaTest.TestAgent, fn _state -> "end hook called!" end)
         end,
-        ultimo_id: 0
+        last_processed_event_id: 0
       })
 
     ref = Process.monitor(pid)
@@ -64,8 +64,8 @@ defmodule HenkaTest do
 
     {:ok, pid} =
       Henka.run(%{
-        producer: fn %{ultimo_id: ultimo_id} ->
-          Enum.filter(Enum.to_list(1..10), fn x -> x > ultimo_id end)
+        producer: fn %{last_processed_event_id: last_processed_event_id} ->
+          Enum.filter(Enum.to_list(1..10), fn x -> x > last_processed_event_id end)
         end,
         consumer: fn _item, _meta -> nil end,
         number_of_consumers: 10,
@@ -73,7 +73,7 @@ defmodule HenkaTest do
           Agent.update(HenkaTest.TestAgent, fn _state -> "begin hook called!" end)
           state
         end,
-        ultimo_id: 0
+        last_processed_event_id: 0
       })
 
     ref = Process.monitor(pid)

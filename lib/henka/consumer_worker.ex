@@ -14,26 +14,26 @@ defmodule Henka.ConsumerWorker do
   def handle_info(:consume, state) do
     do_consume(state)
     |> case do
-      {:ok, :fim} -> {:stop, :normal, state}
+      {:ok, :end} -> {:stop, :normal, state}
       _ -> {:noreply, state}
     end
   end
 
   defp do_consume(state) do
-    Henka.recuperar_entidades_da_fila(state.etl_pid, state.consumer_chunk)
+    Henka.consume_events(state.henka_job_pid, state.consumer_chunk)
     |> case do
       [] ->
-        case Henka.enfileirando?(state.etl_pid) do
+        case Henka.producing?(state.henka_job_pid) do
           true ->
             Process.send_after(self(), :consume, 50)
 
           false ->
-            Henka.iniciar_finalizacao_da_carga(state.etl_pid)
-            {:ok, :fim}
+            Henka.iniciar_finalizacao_da_carga(state.henka_job_pid)
+            {:ok, :end}
         end
 
-      entidades when is_list(entidades) ->
-        state.consumer_function.(entidades, state.etl_meta)
+      events when is_list(events) ->
+        state.consumer_function.(events, state.henka_job_meta)
         Process.send(self(), :consume, [])
     end
   end

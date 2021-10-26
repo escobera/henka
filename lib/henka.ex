@@ -3,19 +3,20 @@ defmodule Henka do
 
   alias Henka.{ConsumerWorker, ConsumerSupervisor}
 
-  @fila_maxima 20_000
-  @fila_minima 2_000
+  @max_queue_length 20_000
+  @min_queue_length 2_000
 
   @impl true
   def init(options) do
     default_options = %{
       status: :started,
       queue: :queue.new(),
-      henka_ref: self(),
+      henka_job_pid: self(),
       begin_hook: & &1,
       end_hook: & &1,
       ack_hook: & &1,
       producer_pid: nil,
+      last_processed_event_id: 0,
       number_of_consumers: 10,
       consumer_chunk: 100,
       queue_size: 0,
@@ -26,7 +27,7 @@ defmodule Henka do
 
     initial_state = merged_options.begin_hook.(merged_options)
 
-    {:ok, initial_state, {:continue, :start_enqueuing}}
+    {:ok, initial_state, {:continue, :start_producing_events}}
   end
 
   def run(opts) do
@@ -40,30 +41,34 @@ defmodule Henka do
   end
 
   def status(pid) do
-    GenServer.call(pid, :status, 10_000)
+    GenServer.call(pid, :state_summary, 10_000)
   end
 
-  def enfileirar_eventos(eventos, %{queue: fila} = state) do
-    {fila, ultimo_evento} =
-      Enum.reduce(eventos, {fila, nil}, fn evento, {fila, _ultima_evento} ->
-        {:queue.in(evento, fila), evento}
+  def enqueue_events(events, %{queue: queue} = state) do
+    {queue, last_event} =
+      Enum.reduce(events, {queue, nil}, fn evento, {queue, _ultima_evento} ->
+        {:queue.in(evento, queue), evento}
       end)
 
     state.ack_hook.(state)
 
     state
-    |> Map.put(:queue, fila)
-    |> Map.put(:ultimo_id, get_ultimo_id(ultimo_evento, state))
+    |> Map.put(:queue, queue)
+    |> Map.put(:last_processed_event_id, last_processed_event_id(last_event, state))
   end
 
-  defp get_ultimo_id(evt, %{campo_ultimo_id: campo_ultimo_id}), do: Map.get(evt, campo_ultimo_id)
-  defp get_ultimo_id(evt, _), do: evt
+  defp last_processed_event_id(evt, %{
+         last_processed_event_id_field: last_processed_event_id_field
+       }),
+       do: Map.get(evt, last_processed_event_id_field)
 
-  defp produzir_mais(%{status: :enfileiramento_finalizado} = state), do: state
-  defp produzir_mais(%{status: :finalizando_carga} = state), do: state
+  defp last_processed_event_id(evt, _), do: evt
 
-  defp produzir_mais(%{producer: producer, queue: fila, producer_pid: producer_pid} = state) do
-    case produzindo?(producer_pid) do
+  defp produce(%{status: :consuming_stopped} = state), do: state
+  defp produce(%{status: :ending_job} = state), do: state
+
+  defp produce(%{producer: producer, queue: fila, producer_pid: producer_pid} = state) do
+    case producer_running?(producer_pid) do
       true ->
         state
 
@@ -71,17 +76,17 @@ defmodule Henka do
         {:ok, task_pid} =
           Task.start_link(fn ->
             case :queue.len(fila) do
-              tamanho when tamanho > @fila_maxima ->
+              size when size > @max_queue_length ->
                 state
 
               _ ->
                 producer.(state)
                 |> case do
                   [] ->
-                    GenServer.cast(state.henka_ref, {:alterar_status, :enfileiramento_finalizado})
+                    GenServer.cast(state.henka_job_pid, {:change_status, :consuming_stopped})
 
                   eventos ->
-                    GenServer.cast(state.henka_ref, {:enfileirar, eventos})
+                    GenServer.cast(state.henka_job_pid, {:enqueue, eventos})
                 end
             end
           end)
@@ -90,9 +95,9 @@ defmodule Henka do
     end
   end
 
-  defp produzindo?(nil), do: false
+  defp producer_running?(nil), do: false
 
-  defp produzindo?(pid) do
+  defp producer_running?(pid) do
     case Process.info(pid) do
       nil -> false
       _ -> true
@@ -103,34 +108,34 @@ defmodule Henka do
     running_consumers() > 0
   end
 
-  def enfileirando?(pid) do
-    status_atom(pid) == :enfileirando_entidades
+  def producing?(pid) do
+    status_atom(pid) == :producing_events
   end
 
   defp status_atom(pid) do
     status(pid) |> Map.get(:status)
   end
 
-  def retirar(fila, qtd), do: do_retirar(fila, {qtd, []})
+  def dequeue(queue, qty), do: do_dequeue(queue, {qty, []})
 
-  defp do_retirar(fila, {n, acc}) when n > 0 do
-    case :queue.out(fila) do
-      {{:value, e}, resto} ->
-        do_retirar(resto, {n - 1, [e | acc]})
+  defp do_dequeue(queue, {n, acc}) when n > 0 do
+    case :queue.out(queue) do
+      {{:value, e}, rest} ->
+        do_dequeue(rest, {n - 1, [e | acc]})
 
-      {:empty, fila} ->
-        {Enum.reverse(acc), fila}
+      {:empty, queue} ->
+        {Enum.reverse(acc), queue}
     end
   end
 
-  defp do_retirar(fila, {_, acc}), do: {Enum.reverse(acc), fila}
+  defp do_dequeue(queue, {_, acc}), do: {Enum.reverse(acc), queue}
 
-  def recuperar_entidades_da_fila(pid, quantidade) do
-    GenServer.call(pid, {:retirar, quantidade})
+  def consume_events(pid, quantity) do
+    GenServer.call(pid, {:dequeue, quantity})
   end
 
   def iniciar_finalizacao_da_carga(pid) do
-    GenServer.cast(pid, :iniciar_finalizacao_da_carga)
+    GenServer.cast(pid, :start_ending_job)
   end
 
   defp running_consumers() do
@@ -139,28 +144,39 @@ defmodule Henka do
     |> Map.get(:workers)
   end
 
+  defp present_state_summary(state) do
+    %{
+      status: state.status,
+      henka_job_pid: state.henka_job_pid,
+      producer_pid: state.producer_pid,
+      last_processed_event_id: state.last_processed_event_id,
+      queue_size: :queue.len(state.queue),
+      meta: state.meta
+    }
+  end
+
   ####
   #  CALLBACKS
   ####
 
   @impl true
-  def handle_continue(:start_enqueuing, state) do
-    Process.send_after(self(), :produzir, 10)
-    {:noreply, %{state | status: :enfileirando_entidades}, {:continue, :consumir_fila}}
+  def handle_continue(:start_producing_events, state) do
+    Process.send_after(self(), :produce, 10)
+    {:noreply, %{state | status: :producing_events}, {:continue, :start_consumers}}
   end
 
   @impl true
-  def handle_continue(:consumir_fila, state) do
+  def handle_continue(:start_consumers, state) do
     for _i <- 1..state.number_of_consumers do
       DynamicSupervisor.start_child(
         ConsumerSupervisor,
         {ConsumerWorker,
          %{
-           etl_pid: state.henka_ref,
+           henka_job_pid: state.henka_job_pid,
            producer_pid: state.producer_pid,
            consumer_function: state.consumer,
            consumer_chunk: state.consumer_chunk,
-           etl_meta: state.meta
+           henka_job_meta: state.meta
          }}
       )
     end
@@ -169,65 +185,61 @@ defmodule Henka do
   end
 
   @impl true
-  def handle_cast(:iniciar_finalizacao_da_carga, state) do
-    case state.status == :finalizando_carga do
+  def handle_cast(:start_ending_job, state) do
+    case state.status == :ending_job do
       true ->
         {:noreply, state}
 
       _ ->
-        Process.send_after(state.henka_ref, :maybe_finalizar_carga, 1_000)
-        {:noreply, %{state | status: :finalizando_carga}}
+        Process.send_after(state.henka_job_pid, :maybe_end_job, 500)
+        {:noreply, %{state | status: :ending_job}}
     end
   end
 
   @impl true
-  def handle_cast({:enfileirar, eventos}, state) do
-    {:noreply, enfileirar_eventos(eventos, state)}
+  def handle_cast({:enqueue, events}, state) do
+    {:noreply, enqueue_events(events, state)}
   end
 
   @impl true
-  def handle_cast({:alterar_status, status}, state) do
+  def handle_cast({:change_status, status}, state) do
     {:noreply, %{state | status: status}}
   end
 
   @impl true
-  def handle_call(:status, _from, state) do
-    resumo_state =
-      Map.delete(state, :queue)
-      |> Map.put(:tamanho_fila, :queue.len(state.queue))
-
-    {:reply, resumo_state, state}
+  def handle_call(:state_summary, _from, state) do
+    {:reply, present_state_summary(state), state}
   end
 
   @impl true
-  def handle_call({:retirar, qtd}, _from, state) do
-    case :queue.len(state.queue) < @fila_minima do
+  def handle_call({:dequeue, qty}, _from, state) do
+    case :queue.len(state.queue) < @min_queue_length do
       true ->
-        Process.send(self(), :produzir, [])
-        {items, resto} = retirar(state.queue, qtd)
-        {:reply, items, %{state | queue: resto}}
+        Process.send(self(), :produce, [])
+        {items, rest} = dequeue(state.queue, qty)
+        {:reply, items, %{state | queue: rest}}
 
       false ->
-        {items, resto} = retirar(state.queue, qtd)
-        {:reply, items, %{state | queue: resto}}
+        {items, rest} = dequeue(state.queue, qty)
+        {:reply, items, %{state | queue: rest}}
     end
   end
 
   @impl true
-  def handle_info(:maybe_finalizar_carga, state) do
+  def handle_info(:maybe_end_job, state) do
     case running_consumers() do
       0 ->
         state = state.end_hook.(state)
         {:stop, :normal, state}
 
       i when i < state.number_of_consumers ->
-        Process.send_after(self(), :maybe_finalizar_carga, 1_000)
+        Process.send_after(self(), :maybe_end_job, 1_000)
         {:noreply, state}
     end
   end
 
   @impl true
-  def handle_info(:produzir, state) do
-    {:noreply, produzir_mais(state)}
+  def handle_info(:produce, state) do
+    {:noreply, produce(state)}
   end
 end
