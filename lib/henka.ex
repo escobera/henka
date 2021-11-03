@@ -96,13 +96,7 @@ defmodule Henka do
   end
 
   defp producer_running?(nil), do: false
-
-  defp producer_running?(pid) do
-    case Process.info(pid) do
-      nil -> false
-      _ -> true
-    end
-  end
+  defp producer_running?(pid), do: Process.alive?(pid)
 
   def running? do
     running_consumers() > 0
