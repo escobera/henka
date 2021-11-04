@@ -3,9 +3,6 @@ defmodule Henka do
 
   alias Henka.{ConsumerWorker, ConsumerSupervisor}
 
-  @max_queue_length 20_000
-  @min_queue_length 2_000
-
   @impl true
   def init(options) do
     default_options = %{
@@ -15,6 +12,8 @@ defmodule Henka do
       begin_hook: & &1,
       end_hook: & &1,
       ack_hook: & &1,
+      min_queue: 2_000,
+      max_queue: 20_000,
       producer_pid: nil,
       last_processed_event_id: 0,
       number_of_consumers: 10,
@@ -76,7 +75,7 @@ defmodule Henka do
         {:ok, task_pid} =
           Task.start_link(fn ->
             case :queue.len(fila) do
-              size when size > @max_queue_length ->
+              size when size > state.max_queue ->
                 state
 
               _ ->
@@ -207,7 +206,7 @@ defmodule Henka do
 
   @impl true
   def handle_call({:dequeue, qty}, _from, state) do
-    case :queue.len(state.queue) < @min_queue_length do
+    case :queue.len(state.queue) < state.min_queue do
       true ->
         Process.send(self(), :produce, [])
         {items, rest} = dequeue(state.queue, qty)
