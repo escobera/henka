@@ -12,10 +12,16 @@ defmodule Henka.ConsumerWorker do
   end
 
   def handle_info(:consume, state) do
-    do_consume(state)
-    |> case do
-      {:ok, :end} -> {:stop, :normal, state}
-      _ -> {:noreply, state}
+    case Process.alive?(state.henka_job_pid) do
+      true ->
+        do_consume(state)
+        |> case do
+          {:ok, :end} -> {:stop, :normal, state}
+          _ -> {:noreply, state}
+        end
+
+      _ ->
+        {:stop, :normal, state}
     end
   end
 
