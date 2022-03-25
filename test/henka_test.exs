@@ -1,6 +1,5 @@
 defmodule HenkaTest do
   use ExUnit.Case, async: true
-  doctest Henka
 
   defmodule MockProducer do
     use Agent

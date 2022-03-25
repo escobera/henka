@@ -1,9 +1,48 @@
 defmodule Henka do
+  @moduledoc """
+  This is the entrypoint of the library, it orchestrate the work of the other processes
+
+  This module is responsible for:
+      - Initializing the work with `run/1`
+      - Storing the hooks or callbacks inside its state
+      - Calling said hooks during its lifecycle
+      - Produce new events
+      - Store a queue of events to be sent to consumers (back-pressure)
+      - Keep track of runnign consumers
+      - Determine the end of the job
+  """
   use GenServer
 
   alias Henka.{ConsumerWorker, ConsumerSupervisor}
 
+  @doc """
+  Runs a Henka job for the given options
+
+  Returns `{:ok, pid_of_genserver}` or errors out if there is already a job running.
+
+  ## Example
+
+      iex(1)> {:ok, _pid} = Henka.run(%{
+      ...(1)>         producer: fn _ -> [1,2,3,4] end,
+      ...(1)>         consumer: fn events, _state -> events end,
+      ...(1)>         number_of_consumers: 1,
+      ...(1)>         last_processed_event_id: 0
+      ...(1)>       })
+
+  """
+  @spec run(any) :: :ignore | {:error, any} | {:ok, pid}
+  def run(opts) do
+    case running?() do
+      true ->
+        {:error, "There's a running Henka job on pid #{inspect(Process.whereis(__MODULE__))}"}
+
+      false ->
+        GenServer.start_link(__MODULE__, opts, name: __MODULE__, spawn_opt: [fullsweep_after: 0])
+    end
+  end
+
   @impl true
+  @spec init(map) :: {:ok, any, {:continue, :start_producing_events}}
   def init(options) do
     default_options = %{
       status: :started,
@@ -27,16 +66,6 @@ defmodule Henka do
     initial_state = merged_options.begin_hook.(merged_options)
 
     {:ok, initial_state, {:continue, :start_producing_events}}
-  end
-
-  def run(opts) do
-    case running?() do
-      true ->
-        {:error, "There's a running Henka job on pid #{inspect(Process.whereis(__MODULE__))}"}
-
-      false ->
-        GenServer.start_link(__MODULE__, opts, name: __MODULE__, spawn_opt: [fullsweep_after: 0])
-    end
   end
 
   def status(pid) do
@@ -109,7 +138,7 @@ defmodule Henka do
     status(pid) |> Map.get(:status)
   end
 
-  def dequeue(queue, qty), do: do_dequeue(queue, {qty, []})
+  def dequeue(queue, quantity), do: do_dequeue(queue, {quantity, []})
 
   defp do_dequeue(queue, {n, acc}) when n > 0 do
     case :queue.out(queue) do
@@ -205,15 +234,15 @@ defmodule Henka do
   end
 
   @impl true
-  def handle_call({:dequeue, qty}, _from, state) do
+  def handle_call({:dequeue, quantity}, _from, state) do
     case :queue.len(state.queue) < state.min_queue do
       true ->
         Process.send(self(), :produce, [])
-        {items, rest} = dequeue(state.queue, qty)
+        {items, rest} = dequeue(state.queue, quantity)
         {:reply, items, %{state | queue: rest}}
 
       false ->
-        {items, rest} = dequeue(state.queue, qty)
+        {items, rest} = dequeue(state.queue, quantity)
         {:reply, items, %{state | queue: rest}}
     end
   end
