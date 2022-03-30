@@ -1,6 +1,6 @@
 # Henka
 
-Henka is a way to move data from one place to another, like a worse version of [Broadway](https://github.com/dashbitco/broadway).
+Henka is a way for exchanging events between producers and consumers, like a worse version of [GenStage](https://github.com/elixir-lang/gen_stage).
 
 ## Installation
 
